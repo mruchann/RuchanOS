@@ -56,7 +56,7 @@ __attribute__((naked))
 __attribute__((aligned(4)))
 void kernel_entry(void) { // exception handler
     __asm__ __volatile__(
-        "csrw sscratch, sp\n"
+        "csrrw sp, sscratch, sp\n" // swap(sp, sscratch)
         "addi sp, sp, -4 * 31\n"
         "sw ra,  4 * 0(sp)\n"
         "sw gp,  4 * 1(sp)\n"
@@ -91,6 +91,9 @@ void kernel_entry(void) { // exception handler
 
         "csrr a0, sscratch\n"
         "sw a0, 4 * 30(sp)\n"
+
+        "addi a0, sp, 4 * 31\n"
+        "csrw sscratch, a0\n"
 
         "mv a0, sp\n"
         "call handle_trap\n"
@@ -286,6 +289,12 @@ void yield(void) {
         return;
     }
 
+    __asm__ __volatile__(
+        "csrw sscratch, %[sscratch]\n"
+        :
+        : [sscratch] "r" ((uint32_t) &next->stack[sizeof(next->stack)])
+    );
+
     struct process* prev = current_proc;
     current_proc = next;
     switch_context(&prev->sp, &next->sp);
@@ -337,3 +346,9 @@ void kernel_main(void) {
     PANIC("booted!");
     printf("unreachable here!\n");
 }
+
+/*
+Now, whenever an exception occurs, 
+the OS will retrieve this saved value from sscratch and 
+use it as the kernel stack.
+*/
