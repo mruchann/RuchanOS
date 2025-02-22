@@ -43,6 +43,11 @@ void putchar(char ch) {
     sbi_console_putchar(ch);
 }
 
+long getchar(void) {
+    struct sbiret ret = sbi_call(0, 0, 0, 0, 0, 0, 0, 2);
+    return ret.error;
+}
+
 __attribute__((section(".text.boot")))
 __attribute__((naked))
 void boot(void) {
@@ -139,95 +144,6 @@ void kernel_entry(void) { // exception handler
     );
 }
 
-// -----------------------------------------------------------------------------
-
-/*
-scause:
-    Type of exception. The kernel reads this to identify the type of exception.
-stval:	
-    Additional information about the exception (e.g., memory address that caused the exception). Depends on the type of exception.
-sepc:	
-    Program counter at the point where the exception occurred.
-sstatus:
-    Operation mode (U-Mode/S-Mode) when the exception has occurred.
-*/
-
-void handle_syscall(struct trap_frame *f) {
-    switch (f->a3) {
-        case SYS_PUTCHAR:
-            putchar(f->a0);
-            break;
-        default:
-            PANIC("unexpected syscall a3=%x\n", f->a3);
-    }
-}
-
-void handle_trap(struct trap_frame* f) {
-    uint32_t scause = READ_CSR(scause);
-    uint32_t stval = READ_CSR(stval);
-    uint32_t user_pc = READ_CSR(sepc);
-
-    if (scause == SCAUSE_ECALL) {
-        handle_syscall(f);
-        user_pc += 4;
-    } 
-    else {
-        PANIC("unexpected trap scause=%x, stval=%x, sepc=%x\n", scause, stval, user_pc);
-    }
-
-    WRITE_CSR(sepc, user_pc);
-}
-
-paddr_t alloc_pages(uint32_t n) {
-    static paddr_t next_paddr = (paddr_t) __free_ram;
-    paddr_t paddr = next_paddr;
-    next_paddr += n * PAGE_SIZE;
-
-    if (next_paddr > (paddr_t) __free_ram_end) {
-        PANIC("out of memory");
-    }
-
-    memset((void*) paddr, 0, n * PAGE_SIZE);
-    return paddr;
-}
-
-/*
-alloc_pages test: paddr0=80221000
-alloc_pages test: paddr1=80223000
-PANIC: kernel.c:177: booted!
-
-$ llvm-nm kernel.elf | grep __free_ram
-80221000 B __free_ram
-84221000 B __free_ram_end
-*/
-
-// VA => VPN1 | VPN0 | VPO
-// Right 10 bits are reserved for flags, we align according to that.
-// info mem QEMU command.
-
-void map_page(uint32_t* table1, uint32_t vaddr, paddr_t paddr, uint32_t flags) {
-    if (!is_aligned(vaddr, PAGE_SIZE)) {
-        PANIC("unaligned vaddr %x", vaddr);
-    }
-
-    if (!is_aligned(paddr, PAGE_SIZE)) {
-        PANIC("unaligned paddr %x", paddr);
-    }
-
-    uint32_t vpn1 = (vaddr >> 22) & 0x3ff;
-    if ((table1[vpn1] & PAGE_V) == 0) {
-        // Create a non-existent 2nd level PT.
-        uint32_t pt_paddr = alloc_pages(1);
-        table1[vpn1] = ((pt_paddr / PAGE_SIZE) << 10) | PAGE_V;
-    }
-
-    // Set the 2nd level PTE to map the PPN.
-    uint32_t vpn0 = (vaddr >> 12) & 0x3ff;
-    uint32_t* table0 = (uint32_t*) ((table1[vpn1] >> 10) * PAGE_SIZE);
-    table0[vpn0] = ((paddr / PAGE_SIZE) << 10) | flags | PAGE_V;
-}
-
-// -----------------------------------------------------------------------------
 
 struct process procs[PROCS_MAX];
 
@@ -236,76 +152,6 @@ struct process* idle_proc;
 
 struct process* proc_a;
 struct process* proc_b;
-
-__attribute__((naked)) 
-void user_entry(void) {
-    __asm__ __volatile__(
-        "csrw sepc, %[sepc]\n"
-        "csrw sstatus, %[sstatus]\n"
-        "sret\n"
-        :
-        : [sepc] "r" (USER_BASE), [sstatus] "r" (SSTATUS_SPIE)
-    );
-}
-
-struct process* create_process(const void* image, size_t image_size) {
-    struct process* proc = NULL;
-
-    int id;
-    for (id = 0; id < PROCS_MAX; id++) {
-        if (procs[id].state == PROC_UNUSED) {
-            proc = &procs[id];
-            break;
-        }
-    }
-
-    if (!proc) {
-        PANIC("no free process slots");
-    }
-
-    // Callee-saved registers. They will be restored in the first context switch.
-    uint32_t* sp = (uint32_t*) &proc->stack[sizeof(proc->stack)];
-
-               // ---
-    *--sp = 0; // s11
-    *--sp = 0; // s10
-    *--sp = 0; // s9
-    *--sp = 0; // s8
-    *--sp = 0; // s7
-    *--sp = 0; // s6
-    *--sp = 0; // s5
-    *--sp = 0; // s4
-    *--sp = 0; // s3
-    *--sp = 0; // s2
-    *--sp = 0; // s1
-    *--sp = 0; // s0
-    *--sp = (uint32_t) user_entry; // ra
-
-    // Map kernel pages
-    uint32_t* page_table = (uint32_t*) alloc_pages(1);
-    for (paddr_t paddr = (paddr_t) __kernel_base; paddr < (paddr_t) __free_ram_end; paddr += PAGE_SIZE) {
-        map_page(page_table, paddr, paddr, PAGE_R | PAGE_W | PAGE_X);
-    }
-
-    // Map user pages
-    for (uint32_t off = 0; off < image_size; off += PAGE_SIZE) {
-        paddr_t page = alloc_pages(1);
-
-        size_t remaining = image_size - off;
-        size_t copy_size = PAGE_SIZE <= remaining ? PAGE_SIZE : remaining;
-
-        // Fill and map the page.
-        memcpy((void *) page, image + off, copy_size);
-        map_page(page_table, USER_BASE + off, page, PAGE_U | PAGE_R | PAGE_W | PAGE_X);
-    }
-
-    proc->pid = id + 1;
-    proc->state = PROC_RUNNABLE;
-    proc->sp = (uint32_t) sp;
-    proc->page_table = page_table;
-
-    return proc;
-}
 
 // https://riscv.org/wp-content/uploads/2024/12/riscv-calling.pdf
 
@@ -391,6 +237,183 @@ void yield(void) {
     );
 
     switch_context(&prev->sp, &next->sp);
+}
+
+// -----------------------------------------------------------------------------
+
+/*
+scause:
+    Type of exception. The kernel reads this to identify the type of exception.
+stval:	
+    Additional information about the exception (e.g., memory address that caused the exception). Depends on the type of exception.
+sepc:	
+    Program counter at the point where the exception occurred.
+sstatus:
+    Operation mode (U-Mode/S-Mode) when the exception has occurred.
+*/
+
+void handle_syscall(struct trap_frame *f) {
+    switch (f->a3) {
+        case SYS_PUTCHAR:
+            putchar(f->a0);
+            break;
+        case SYS_GETCHAR:
+            while (1) {
+                long ch = getchar();
+                if (ch >= 0) {
+                    f->a0 = ch;
+                    break;
+                }
+
+                yield();
+            }
+            break;
+        case SYS_EXIT: // ideally we should free resources like PT and PM
+            printf("process %d exited\n", current_proc->pid);
+            current_proc->state = PROC_EXITED;
+            yield();
+            PANIC("unreachable");
+            break;
+        default:
+            PANIC("unexpected syscall a3=%x\n", f->a3);
+    }
+}
+
+void handle_trap(struct trap_frame* f) {
+    uint32_t scause = READ_CSR(scause);
+    uint32_t stval = READ_CSR(stval);
+    uint32_t user_pc = READ_CSR(sepc);
+
+    if (scause == SCAUSE_ECALL) {
+        handle_syscall(f);
+        user_pc += 4;
+    } 
+    else {
+        PANIC("unexpected trap scause=%x, stval=%x, sepc=%x\n", scause, stval, user_pc);
+    }
+
+    WRITE_CSR(sepc, user_pc);
+}
+
+paddr_t alloc_pages(uint32_t n) {
+    static paddr_t next_paddr = (paddr_t) __free_ram;
+    paddr_t paddr = next_paddr;
+    next_paddr += n * PAGE_SIZE;
+
+    if (next_paddr > (paddr_t) __free_ram_end) {
+        PANIC("out of memory");
+    }
+
+    memset((void*) paddr, 0, n * PAGE_SIZE);
+    return paddr;
+}
+
+/*
+alloc_pages test: paddr0=80221000
+alloc_pages test: paddr1=80223000
+PANIC: kernel.c:177: booted!
+
+$ llvm-nm kernel.elf | grep __free_ram
+80221000 B __free_ram
+84221000 B __free_ram_end
+*/
+
+// VA => VPN1 | VPN0 | VPO
+// Right 10 bits are reserved for flags, we align according to that.
+// info mem QEMU command.
+
+void map_page(uint32_t* table1, uint32_t vaddr, paddr_t paddr, uint32_t flags) {
+    if (!is_aligned(vaddr, PAGE_SIZE)) {
+        PANIC("unaligned vaddr %x", vaddr);
+    }
+
+    if (!is_aligned(paddr, PAGE_SIZE)) {
+        PANIC("unaligned paddr %x", paddr);
+    }
+
+    uint32_t vpn1 = (vaddr >> 22) & 0x3ff;
+    if ((table1[vpn1] & PAGE_V) == 0) {
+        // Create a non-existent 2nd level PT.
+        uint32_t pt_paddr = alloc_pages(1);
+        table1[vpn1] = ((pt_paddr / PAGE_SIZE) << 10) | PAGE_V;
+    }
+
+    // Set the 2nd level PTE to map the PPN.
+    uint32_t vpn0 = (vaddr >> 12) & 0x3ff;
+    uint32_t* table0 = (uint32_t*) ((table1[vpn1] >> 10) * PAGE_SIZE);
+    table0[vpn0] = ((paddr / PAGE_SIZE) << 10) | flags | PAGE_V;
+}
+
+// -----------------------------------------------------------------------------
+
+__attribute__((naked)) 
+void user_entry(void) {
+    __asm__ __volatile__(
+        "csrw sepc, %[sepc]\n"
+        "csrw sstatus, %[sstatus]\n"
+        "sret\n"
+        :
+        : [sepc] "r" (USER_BASE), [sstatus] "r" (SSTATUS_SPIE)
+    );
+}
+
+struct process* create_process(const void* image, size_t image_size) {
+    struct process* proc = NULL;
+
+    int id;
+    for (id = 0; id < PROCS_MAX; id++) {
+        if (procs[id].state == PROC_UNUSED) {
+            proc = &procs[id];
+            break;
+        }
+    }
+
+    if (!proc) {
+        PANIC("no free process slots");
+    }
+
+    // Callee-saved registers. They will be restored in the first context switch.
+    uint32_t* sp = (uint32_t*) &proc->stack[sizeof(proc->stack)];
+
+               // ---
+    *--sp = 0; // s11
+    *--sp = 0; // s10
+    *--sp = 0; // s9
+    *--sp = 0; // s8
+    *--sp = 0; // s7
+    *--sp = 0; // s6
+    *--sp = 0; // s5
+    *--sp = 0; // s4
+    *--sp = 0; // s3
+    *--sp = 0; // s2
+    *--sp = 0; // s1
+    *--sp = 0; // s0
+    *--sp = (uint32_t) user_entry; // ra
+
+    // Map kernel pages
+    uint32_t* page_table = (uint32_t*) alloc_pages(1);
+    for (paddr_t paddr = (paddr_t) __kernel_base; paddr < (paddr_t) __free_ram_end; paddr += PAGE_SIZE) {
+        map_page(page_table, paddr, paddr, PAGE_R | PAGE_W | PAGE_X);
+    }
+
+    // Map user pages
+    for (uint32_t off = 0; off < image_size; off += PAGE_SIZE) {
+        paddr_t page = alloc_pages(1);
+
+        size_t remaining = image_size - off;
+        size_t copy_size = PAGE_SIZE <= remaining ? PAGE_SIZE : remaining;
+
+        // Fill and map the page.
+        memcpy((void *) page, image + off, copy_size);
+        map_page(page_table, USER_BASE + off, page, PAGE_U | PAGE_R | PAGE_W | PAGE_X);
+    }
+
+    proc->pid = id + 1;
+    proc->state = PROC_RUNNABLE;
+    proc->sp = (uint32_t) sp;
+    proc->page_table = page_table;
+
+    return proc;
 }
 
 void proc_a_entry(void) {
