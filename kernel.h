@@ -5,6 +5,12 @@
 #define PROC_UNUSED 0
 #define PROC_RUNNABLE 1
 
+#define SCAUSE_ECALL 8
+
+#define USER_BASE 0x1000000
+
+#define SSTATUS_SPIE (1 << 5)
+
 #define SATP_SV32 (1u << 31)
 
 // PTE flags:

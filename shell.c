@@ -1,5 +1,5 @@
-#include "user.h"
+#include "shell.h"
 
 void main(void) {
-    while (1);
+    printf("Hello World from shell!\n");
 }
