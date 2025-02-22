@@ -185,6 +185,7 @@ $ llvm-nm kernel.elf | grep __free_ram
 
 // VA => VPN1 | VPN0 | VPO
 // Right 10 bits are reserved for flags, we align according to that.
+// info mem QEMU command.
 
 void map_page(uint32_t* table1, uint32_t vaddr, paddr_t paddr, uint32_t flags) {
     if (!is_aligned(vaddr, PAGE_SIZE)) {
@@ -354,7 +355,7 @@ void yield(void) {
 void proc_a_entry(void) {
     printf("starting process A\n");
     while (1) {
-        putchar('A');
+        // putchar('A');
         yield();
         delay();
     }
@@ -363,7 +364,7 @@ void proc_a_entry(void) {
 void proc_b_entry(void) {
     printf("starting process B\n");
     while (1) {
-        putchar('B');
+        // putchar('B');
         yield();
         delay();
     }
