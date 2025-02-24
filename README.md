@@ -1,6 +1,6 @@
 ### 32-bit RISC-V OS
 
-`disk`/     - File system contents \
+`disk/`     - File system contents \
 `common.c`  - Kernel/user common library: printf, memset, ... \
 `common.h`  - Kernel/user common library: definitions of structs and constants \
 `kernel.c`  - Kernel: process management, system calls, device drivers, file system \
