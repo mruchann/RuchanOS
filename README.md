@@ -10,4 +10,4 @@
 `user.c`    - User library: functions for system calls \
 `user.h`    - User library: definitions of structs and constants \
 `user.ld`   - User: linker script (memory layout definition) \
-`run.sh`    - Build script \
+`run.sh`    - Build script
